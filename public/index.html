@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Win for Life Classico Lab</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <main class="container">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">LOCAL ANALYTICS + PERSONAL TRACKER</p>
+        <h1>Win for Life Classico Lab</h1>
+        <p class="subtitle">Storico, optimizer, portafogli mensili, giocate reali, budget e ROI personale.</p>
+      </div>
+      <div class="pill" id="healthPill">Connessione...</div>
+    </header>
+
+    <nav class="nav card compact-card">
+      <a href="#profilo">Profilo</a>
+      <a href="#storico">Storico</a>
+      <a href="#statistiche">Statistiche</a>
+      <a href="#optimizer">Optimizer</a>
+      <a href="#budget">Budget</a>
+      <a href="#portafogli">Portafogli</a>
+      <a href="#giocate">Giocate</a>
+    </nav>
+
+    <section class="warning">
+      <strong>Importante:</strong> salvare le combinazioni giocate è utile per misurare spesa, risultati, ROI e varianza del metodo, ma non cambia la probabilità della prossima estrazione se le estrazioni sono indipendenti. Una coverage del <strong>100%</strong> significa copertura matematica di almeno una categoria considerata sui 10 numeri principali, <strong>non profitto garantito</strong>.
+    </section>
+
+    <section id="profilo" class="card">
+      <div class="section-head">
+        <div><h2>1. Profilo personale e bankroll</h2><p>Tutto resta nel database SQLite locale <code>data/winforlife.sqlite</code>.</p></div>
+        <label>Mese dashboard<input type="month" id="dashboardMonth" /></label>
+      </div>
+      <div class="grid metrics five">
+        <article class="metric"><span>Bankroll stimato</span><strong id="bankroll">€0,00</strong></article>
+        <article class="metric"><span>Speso nel mese</span><strong id="monthSpent">€0,00</strong></article>
+        <article class="metric"><span>Budget residuo</span><strong id="monthRemaining">€0,00</strong></article>
+        <article class="metric"><span>Premi registrati</span><strong id="monthPayout">€0,00</strong></article>
+        <article class="metric"><span>ROI mese</span><strong id="monthRoi">0,00%</strong></article>
+        <article class="metric"><span>Giocate vincenti mese</span><strong id="monthWins">0</strong></article>
+        <article class="metric"><span>ROI totale</span><strong id="totalRoi">0,00%</strong></article>
+      </div>
+      <form id="profileForm" class="form-grid four">
+        <label>Nome profilo<input id="displayName" maxlength="80" /></label>
+        <label>Bankroll iniziale (€)<input id="initialBankroll" type="number" min="0" step="0.01" /></label>
+        <label>Budget mensile (€)<input id="monthlyBudget" type="number" min="0" step="0.01" /></label>
+        <label>Modalità predefinita
+          <select id="defaultMode"><option value="1e">1 €</option><option value="2e">2 €</option></select>
+        </label>
+        <div class="actions"><button type="submit">Salva profilo</button></div>
+      </form>
+      <div id="profileMsg" class="small-msg"></div>
+
+      <h3>Proiezioni dei portafogli del mese</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Portafoglio</th><th>Tipo</th><th>Costo pianificato</th><th>Coverage/draw</th><th>Draw pianificati</th><th>Prob. ≥1 draw coperto</th><th>Draw coperti attesi</th></tr></thead>
+          <tbody id="monthlyProjectionBody"><tr><td colspan="7">Nessun portafoglio.</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="grid metrics" id="healthMetrics">
+      <article class="card metric"><span>Estrazioni salvate</span><strong id="drawCount">0</strong></article>
+      <article class="card metric"><span>Ultimo concorso</span><strong id="latestContest">—</strong></article>
+      <article class="card metric"><span>Ultima data reale DB</span><strong id="latestDate">—</strong></article>
+      <article class="card metric"><span>Universo 10/20</span><strong>184.756</strong></article>
+    </section>
+
+    <section id="storico" class="card">
+      <div class="section-head"><div><h2>2. Import storico ufficiale</h2><p>ID corretto per <strong>data + concorso</strong>; giornate con 0 risultati vengono segnalate e non marcate OK.</p></div></div>
+      <form id="scrapeForm" class="form-grid four">
+        <label>Da<input type="date" id="fromDate" value="2013-01-21" required /></label>
+        <label>A<input type="date" id="toDate" required /></label>
+        <label>Delay richieste (ms)<input type="number" id="delayMs" value="1000" min="250" step="50" /></label>
+        <label class="check"><input type="checkbox" id="force" /> Ricarica giorni già acquisiti</label>
+        <div class="actions"><button type="submit">Avvia import</button><button type="button" class="secondary" id="recentBtn">Ultimi 30 giorni</button></div>
+      </form>
+      <div class="progress-wrap"><div class="progress"><div id="progressBar"></div></div><pre id="scrapeStatus">Nessun job avviato.</pre></div>
+      <h3>Copertura temporale database</h3>
+      <div id="annualSummary" class="chips"></div>
+    </section>
+
+    <section id="statistiche" class="card">
+      <div class="section-head">
+        <div><h2>3. Statistiche storico</h2><p>Frequenze, z-score, ritardi e coppie. Sono descrittive, non una prova di predittività.</p></div>
+        <div class="inline-controls">
+          <select id="statsWindow"><option value="all">Tutto</option><option value="100">Ultime 100</option><option value="500">Ultime 500</option><option value="1000">Ultime 1.000</option><option value="5000">Ultime 5.000</option></select>
+          <button id="refreshStats" type="button">Aggiorna</button>
+        </div>
+      </div>
+      <div class="table-wrap"><table><thead><tr><th>N.</th><th>Uscite</th><th>Freq.</th><th>Z-score</th><th>Ritardo</th><th>Ritardo max</th></tr></thead><tbody id="freqBody"></tbody></table></div>
+      <div class="two-col"><div><h3>Top coppie</h3><div id="pairs" class="chips"></div></div><div><h3>Numerone</h3><div id="numeroni" class="chips"></div></div></div>
+    </section>
+
+    <section id="optimizer" class="card">
+      <div class="section-head"><div><h2>4. Portfolio optimizer</h2><p>Ottimizza la sovrapposizione e poi misura la coverage esattamente su tutti i 184.756 esiti.</p></div></div>
+      <form id="optimizerForm" class="form-grid four">
+        <label>Numero combinazioni<input type="number" id="tickets" value="5" min="1" max="100" /></label>
+        <label>Modalità<select id="mode"><option value="1e">1 € — 7/8/9/10</option><option value="2e">2 € — anche 0/1/2/3</option></select></label>
+        <label>Iterazioni<input type="number" id="iterations" value="1200" min="100" max="10000" step="100" /></label>
+        <label>Seed<input type="number" id="seed" value="42" /></label>
+        <div class="actions"><button type="submit">Ottimizza</button></div>
+      </form>
+      <div id="optimizerMeta" class="optimizer-meta">Nessun portfolio generato.</div>
+      <div id="portfolio" class="portfolio"></div>
+
+      <div class="save-box">
+        <h3>Salva il portfolio generato</h3>
+        <div class="form-grid four">
+          <label>Nome<input id="portfolioName" value="Portfolio principale" /></label>
+          <label>Tipo<select id="portfolioType"><option value="INITIAL">Iniziale</option><option value="MONTHLY" selected>Mensile</option><option value="CUSTOM">Custom</option></select></label>
+          <label>Mese<input type="month" id="portfolioPeriod" /></label>
+          <label>Quante estrazioni prevedi di giocarlo?<input type="number" id="plannedDraws" value="1" min="1" max="10000" /></label>
+        </div>
+        <div class="actions"><button id="saveOptimizerPortfolio" type="button" disabled>Salva nel database</button></div>
+        <div id="savePortfolioMsg" class="small-msg"></div>
+      </div>
+    </section>
+
+    <section id="budget" class="card">
+      <div class="section-head"><div><h2>5. Range di spesa e coverage</h2><p>Il planner genera portfolio progressivi e calcola la coverage <strong>esatta</strong> per ogni riga. Se compare 100%, quel portfolio copre ogni esito principale; non garantisce utile economico.</p></div></div>
+      <form id="coverageForm" class="form-grid five-cols">
+        <label>Budget minimo (€)<input id="minBudget" type="number" value="2" min="1" step="1" /></label>
+        <label>Budget massimo (€)<input id="maxBudget" type="number" value="20" min="1" max="200" step="1" /></label>
+        <label>Modalità<select id="coverageMode"><option value="1e">1 €</option><option value="2e" selected>2 €</option></select></label>
+        <label>Punti da analizzare<input id="maxPoints" type="number" value="10" min="2" max="20" /></label>
+        <label>Seed<input id="coverageSeed" type="number" value="42" /></label>
+        <div class="actions"><button type="submit">Calcola range</button></div>
+      </form>
+      <div id="coverageMeta" class="small-msg"></div>
+      <div class="table-wrap"><table><thead><tr><th>Spesa/draw</th><th>Combinazioni</th><th>Coverage esatta</th><th>Esiti scoperti</th><th>100%?</th></tr></thead><tbody id="coverageBody"><tr><td colspan="5">Avvia il calcolo.</td></tr></tbody></table></div>
+    </section>
+
+    <section id="portafogli" class="card">
+      <div class="section-head"><div><h2>6. Portafogli salvati</h2><p>Da qui puoi registrare il portfolio come realmente giocato su una specifica estrazione.</p></div><button id="refreshPortfolios" type="button" class="secondary">Aggiorna</button></div>
+      <div id="savedPortfolios" class="saved-portfolios"></div>
+
+      <details class="manual-box">
+        <summary>Inserisci un portfolio manuale</summary>
+        <form id="manualPortfolioForm">
+          <div class="form-grid four">
+            <label>Nome<input id="manualPortfolioName" value="Portfolio manuale" /></label>
+            <label>Tipo<select id="manualPortfolioType"><option value="INITIAL">Iniziale</option><option value="MONTHLY">Mensile</option><option value="CUSTOM">Custom</option></select></label>
+            <label>Mese<input id="manualPortfolioPeriod" type="month" /></label>
+            <label>Modalità<select id="manualPortfolioMode"><option value="1e">1 €</option><option value="2e">2 €</option></select></label>
+          </div>
+          <label>Una combinazione per riga: 10 numeri, poi opzionalmente <code>| Numerone</code>
+            <textarea id="manualPortfolioTickets" rows="6" placeholder="1 2 3 4 5 6 7 8 9 10 | 4&#10;11 12 13 14 15 16 17 18 19 20 | 17"></textarea>
+          </label>
+          <div class="actions"><button type="submit">Valuta e salva</button></div>
+        </form>
+        <div id="manualPortfolioMsg" class="small-msg"></div>
+      </details>
+    </section>
+
+    <section id="giocate" class="card">
+      <div class="section-head">
+        <div><h2>7. Giocate personali</h2><p>Le giocate vengono confrontate automaticamente con le estrazioni presenti nel DB. Il payout in euro resta manuale per evitare assunzioni errate sui premi.</p></div>
+        <div class="actions"><button id="settlePlays" type="button">Abbina risultati</button><button id="refreshPlays" type="button" class="secondary">Aggiorna</button></div>
+      </div>
+
+      <details class="manual-box">
+        <summary>Registra una singola giocata manuale</summary>
+        <form id="manualPlayForm" class="form-grid four">
+          <label>Data estrazione<input id="manualPlayDate" type="date" required /></label>
+          <label>Ora estrazione<input id="manualPlayTime" type="time" value="20:00" required /></label>
+          <label>Modalità<select id="manualPlayMode"><option value="1e">1 €</option><option value="2e">2 €</option></select></label>
+          <label>Numerone<input id="manualPlayNumerone" type="number" min="1" max="20" required /></label>
+          <label class="span-3">10 numeri<input id="manualPlayNumbers" placeholder="1 2 3 4 5 6 7 8 9 10" required /></label>
+          <div class="actions"><button type="submit">Salva giocata</button></div>
+        </form>
+      </details>
+
+      <div class="table-wrap"><table><thead><tr><th>ID</th><th>Target</th><th>Portfolio</th><th>Combinazione</th><th>N</th><th>Costo</th><th>Esito</th><th>Categoria</th><th>Premio registrato</th><th>Azione</th></tr></thead><tbody id="playsBody"><tr><td colspan="10">Nessuna giocata.</td></tr></tbody></table></div>
+    </section>
+
+    <section class="card">
+      <div class="section-head"><div><h2>Ultime estrazioni salvate</h2><p>Serve anche per controllare visivamente che il database sia aggiornato.</p></div></div>
+      <div class="table-wrap"><table><thead><tr><th>Concorso</th><th>Data</th><th>Ora</th><th>Combinazione</th><th>Numerone</th></tr></thead><tbody id="drawsBody"></tbody></table></div>
+    </section>
+  </main>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+services:
+  winforlife-analyzer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: winforlife-analyzer
+    restart: unless-stopped
+    environment:
+      PORT: 8080
+      DATA_DIR: /app/data
+      SCRAPE_DELAY_MS: 1000
+      NODE_OPTIONS: --no-warnings
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
