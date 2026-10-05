@@ -170,33 +170,83 @@ $('scrapeForm').addEventListener('submit', async (event) => {
 });
 $('recentBtn').addEventListener('click', () => { const d = new Date(); d.setDate(d.getDate() - 29); $('fromDate').value = d.toISOString().slice(0,10); $('toDate').value = localDateIso(); });
 
+function labFormOptions() {
+  const scenario = {};
+  for (const key of ['base7', 'base8', 'base9', 'base10', 'bonus7', 'bonus8', 'bonus9']) {
+    const field = 'quote' + key[0].toUpperCase() + key.slice(1);
+    const value = Number($(field).value);
+    if (!Number.isFinite(value) || value < 0) throw new Error('Quota ipotetica non valida: ' + key);
+    scenario[key] = Math.round(value * 100);
+  }
+  return { goal: $('optimizerGoal').value, strategy: $('optimizerStrategy').value,
+    quality: $('optimizerQuality').value, historyWindow: $('historyWindow').value,
+    historicalWeight: Number($('historicalWeight').value), recentShare: Number($('recentShare').value), scenario };
+}
+function renderLabAnalysis(result, targetId = 'labAnalysis') {
+  const f = result.financial, h = result.historical;
+  const rate = (x) => x === null || x === undefined ? 'N/D' : pct(x, 4);
+  const score = (x) => x === null || x === undefined ? 'N/D' : Number(x).toFixed(2) + ' / 100';
+  $(targetId).innerHTML = `
+    <h3>${result.name ? 'Analisi: ' + esc(result.name) : 'Probabilita e risultato economico'}</h3>
+    <p>Spesa di questo portfolio: <strong>${euro(f.costCents)} per UN concorso</strong>.</p>
+    <div class="table-wrap"><table><thead><tr><th>Misura</th><th>Probabilita</th><th>Significato</th></tr></thead><tbody>
+      <tr><td>Almeno una categoria premiata</td><td>${pct(100 * f.anyPrizeProbability, 4)}</td><td>Non indica recupero della spesa</td></tr>
+      <tr><td>Incasso lordo almeno pari alla spesa</td><td>${pct(100 * f.recoverProbability, 4)}</td><td>Condizionato alle quote ipotetiche</td></tr>
+      <tr><td>Incasso lordo superiore alla spesa</td><td>${pct(100 * f.profitProbability, 4)}</td><td>NON probabilita di profitto netto reale</td></tr>
+      <tr><td>Perdita nello scenario</td><td>${pct(100 * f.lossProbability, 4)}</td><td>Incasso lordo inferiore alla spesa</td></tr>
+      <tr><td>Almeno una categoria rendita</td><td>${pct(100 * f.annuityProbability, 6)}</td><td>Rendita esclusa dai valori monetari del modello</td></tr>
+    </tbody></table></div>
+    <p><strong>Scenario, non previsione:</strong> incasso immediato lordo medio del modello ${euro(f.meanGrossCashCents)}; differenza media dalla spesa ${euro(f.meanGrossNetCents)}. Quote variabili, imposte e rendita non sono modellate come denaro incassato oggi.</p>
+    <p class="small-msg">Verifica su ${f.outcomeCount.toLocaleString('it-IT')} esiti (numeri principali + Numerone). Esattezza del calcolo NON significa esattezza delle quote ipotizzate.</p>
+    <h3>Confronto col passato: descrittivo, NON predittivo</h3>
+    <div class="table-wrap"><table><thead><tr><th>Dataset</th><th>Estr. valide</th><th>Copertura retrospettiva</th><th>Score descrittivo</th></tr></thead><tbody>
+      <tr><td>Recente</td><td>${h.recent.draws.toLocaleString('it-IT')}</td><td>${rate(h.recent.coveredPct)}</td><td>${score(h.recentScore)}</td></tr>
+      <tr><td>Totale</td><td>${h.all.draws.toLocaleString('it-IT')}</td><td>${rate(h.all.coveredPct)}</td><td>${score(h.totalScore)}</td></tr>
+    </tbody></table></div>
+    <p class="small-msg">${esc(h.note)} Validazione predittiva fuori campione: <strong>NON eseguita</strong>. Pesi dello score scelti dall'utente, non validati come vantaggio.</p>`;
+  if (result.personalEvidence) renderEvidence(result.personalEvidence);
+}
+function syncLabOptions() {
+  const historicalOnly = $('optimizerStrategy').querySelector('option[value="historical"]');
+  historicalOnly.disabled = $('optimizerGoal').value !== 'coverage';
+  if (historicalOnly.disabled && $('optimizerStrategy').value === 'historical') $('optimizerStrategy').value = 'coverage';
+  $('historicalWeight').disabled = $('optimizerStrategy').value !== 'hybrid';
+}
+$('optimizerGoal').addEventListener('change', syncLabOptions);
+$('optimizerStrategy').addEventListener('change', syncLabOptions);
+syncLabOptions();
+
 $('optimizerForm').addEventListener('submit', async (event) => {
   event.preventDefault();
   const button = event.submitter;
   button.disabled = true;
-  $('optimizerMeta').textContent = 'Calcolo in corso...';
+  optimizerResult = null;
+  $('savePortfolioMsg').textContent = '';
+  $('optimizerMeta').textContent = 'Calcolo in corso in un worker: confronto anche i portafogli salvati e rifinisco il risultato...';
+  $('labAnalysis').innerHTML = '';
   $('portfolio').innerHTML = '';
   $('saveOptimizerPortfolio').disabled = true;
   try {
-    optimizerResult = await api('/api/portfolio/optimize', {
-      method: 'POST',
-      body: JSON.stringify({ tickets: Number($('tickets').value), mode: $('mode').value, iterations: Number($('iterations').value), seed: Number($('seed').value) }),
-    });
+    optimizerResult = await api('/api/portfolio/optimize', { method: 'POST', body: JSON.stringify({
+      ...labFormOptions(), tickets: Number($('tickets').value), mode: $('mode').value,
+    }) });
     const e = optimizerResult.exact;
-    const baseline = optimizerResult.baselineExact;
-    const delta = e.percentage - baseline.percentage;
+    const source = optimizerResult.retainedPortfolioId
+      ? `Conservato il portfolio #${optimizerResult.retainedPortfolioId}: non ho trovato un risultato migliore con questi parametri.`
+      : 'Risultato scelto tra i candidati valutati. Salvalo per confrontarlo nelle prossime ricerche.';
+    const objectiveLabels = { coverage: 'Almeno una categoria premiata', profit: 'Superare la spesa nello scenario LORDO', recover: 'Recuperare la spesa nello scenario LORDO' };
     $('optimizerMeta').innerHTML = `
-      <strong class="${e.guaranteedHit ? 'good' : ''}">Coverage esatta: ${pct(e.percentage,4)}</strong><br>
-      ${e.covered.toLocaleString('it-IT')} / ${e.universeSize.toLocaleString('it-IT')} esiti coperti · ${e.uncovered.toLocaleString('it-IT')} scoperti.<br>
-      Random iniziale stesso seed: ${pct(baseline.percentage,4)} · delta ${delta >= 0 ? '+' : ''}${delta.toFixed(4)} punti.<br>
-      ${e.guaranteedHit ? '<strong class="good">100%: almeno una categoria principale coperta per ogni possibile esito. Non equivale a profitto garantito.</strong><br>' : ''}
-      Algoritmo ${esc(optimizerResult.algorithm)}; optimum globale <strong>non garantito</strong>.
-    `;
+      <strong>Copertura categorie: ${pct(e.percentage, 4)}</strong> - ${e.covered.toLocaleString('it-IT')} esiti principali coperti su ${e.universeSize.toLocaleString('it-IT')}.<br>
+      Obiettivo: <strong>${esc(objectiveLabels[optimizerResult.goal])}</strong>. Metodo: ${esc(optimizerResult.strategy)}.<br>
+      ${esc(source)}<br>
+      ${optimizerResult.savedCompared} portafogli salvati compatibili rivalutati; ${optimizerResult.starts} partenze, ${optimizerResult.iterationsPerStart} iterazioni ciascuna; ${optimizerResult.exactRefinementAttempts} tentativi di rifinitura esatta.<br>
+      Riferimento casuale singolo: ${pct(optimizerResult.baselineExact.percentage, 4)} di copertura, non media statistica.<br>
+      <span class="small-msg">Migliore risultato trovato, NON massimo globale dimostrato. Aumentare la qualita non garantisce un miglioramento. Il Numerone viene considerato nel modello economico.</span>`;
+    renderLabAnalysis(optimizerResult);
     $('portfolio').innerHTML = optimizerResult.portfolio.map((ticket, i) => `<div class="ticket"><strong>Combinazione ${i + 1}</strong>${balls(ticket.numbers, ticket.numerone)}</div>`).join('');
     $('saveOptimizerPortfolio').disabled = false;
-  } catch (error) {
-    $('optimizerMeta').innerHTML = `<span class="error">${esc(error.message)}</span>`;
-  } finally { button.disabled = false; }
+  } catch (error) { $('optimizerMeta').innerHTML = `<span class="error">${esc(error.message)}</span>`; }
+  finally { button.disabled = false; }
 });
 
 $('saveOptimizerPortfolio').addEventListener('click', async () => {
@@ -220,6 +270,13 @@ $('saveOptimizerPortfolio').addEventListener('click', async () => {
         algorithm: optimizerResult.algorithm,
         baselinePct: optimizerResult.baselineExact.percentage,
         plannedDraws: Number($('plannedDraws').value || 1),
+        notes: JSON.stringify({ lab: { version: 4, goal: optimizerResult.goal, strategy: optimizerResult.strategy,
+          quality: optimizerResult.quality, baseSeed: optimizerResult.baseSeed,
+          historyWindow: optimizerResult.history.requestedWindow, analyzedDraws: optimizerResult.history.analyzedDraws,
+          lastDate: optimizerResult.historical.all.lastDate, recentShare: optimizerResult.historical.recentShare,
+          historicalWeight: optimizerResult.historicalWeight, scenario: optimizerResult.financial.scenario,
+          conditionalRecoverProbability: optimizerResult.financial.recoverProbability,
+          conditionalProfitProbability: optimizerResult.financial.profitProbability, predictionValidated: false } }),
       }),
     });
     $('savePortfolioMsg').innerHTML = `<span class="good">Salvato portfolio #${saved.id}: coverage ${pct(saved.coveragePct,4)}, costo pianificato ${euro(saved.budgetCents)}.</span>`;
@@ -275,37 +332,60 @@ $('manualPortfolioForm').addEventListener('submit', async (event) => {
 });
 
 async function refreshPortfolios() {
-  const data = await api('/api/portfolios');
+  const data = await api('/api/portfolios?includeArchived=' + ($('showArchived').checked ? '1' : '0'));
   $('savedPortfolios').innerHTML = data.items.length ? data.items.map((p) => `
     <article class="saved-portfolio">
       <div class="saved-portfolio-head">
-        <div><strong>#${p.id} · ${esc(p.name)}</strong><div class="saved-portfolio-meta">${esc(p.portfolioType)} ${p.period ? '· ' + esc(p.period) : ''} · ${p.mode === '1e' ? '1 €' : '2 €'} · ${p.ticketsCount} combinazioni · coverage ${pct(p.coveragePct,4)} · ${euro(p.budgetCents)} pianificati</div></div>
-        ${p.guaranteedHit ? '<span class="badge good">Coverage 100%</span>' : `<span class="badge">${p.universeSize - p.coverageCount} esiti scoperti</span>`}
+        <div><strong>#${p.id} - ${esc(p.name)}</strong><div class="saved-portfolio-meta">${esc(p.status)} - ${esc(p.portfolioType)} ${p.period ? '- ' + esc(p.period) : ''} - ${p.ticketsCount} combinazioni - ${euro(p.ticketCostCents * p.ticketsCount)} per concorso - coverage ${pct(p.coveragePct, 4)}</div></div>
       </div>
-      <details><summary>Mostra combinazioni</summary><div class="portfolio">${p.tickets.map((t) => `<div class="ticket"><strong>#${t.position}</strong>${balls(t.numbers,t.numerone)}</div>`).join('')}</div></details>
+      <details><summary>Mostra combinazioni</summary><div class="portfolio">${p.tickets.map((t) => `<div class="ticket"><strong>#${t.position}</strong>${balls(t.numbers, t.numerone)}</div>`).join('')}</div></details>
       <div class="portfolio-actions">
-        <label>Data<input type="date" class="play-date" data-id="${p.id}" value="${localDateIso()}" /></label>
-        <label>Ora<input type="time" class="play-time" data-id="${p.id}" value="20:00" /></label>
-        <button type="button" class="play-portfolio" data-id="${p.id}">Registra come giocato</button>
+        ${p.status === 'ARCHIVED' ? `<button class="restore-portfolio secondary" data-id="${p.id}" type="button">Ripristina</button>` : `
+          <label>Data<input type="date" class="play-date" data-id="${p.id}" value="${localDateIso()}" /></label>
+          <label>Ora<input type="time" class="play-time" data-id="${p.id}" value="20:00" /></label>
+          <button type="button" class="play-portfolio" data-id="${p.id}">Registra come giocato</button>
+          <button type="button" class="archive-portfolio secondary" data-id="${p.id}">Elimina dalla lista</button>`}
+        <button class="analyze-portfolio secondary" data-id="${p.id}" type="button">Analizza con lo scenario attuale</button>
       </div>
-    </article>`).join('') : '<div class="small-msg">Nessun portfolio salvato.</div>';
+    </article>`).join('') : '<div class="small-msg">Nessun portfolio attivo. Per vedere gli archiviati spunta la casella.</div>';
 }
-$('refreshPortfolios').addEventListener('click', refreshPortfolios);
+$('refreshPortfolios').addEventListener('click', () => refreshPortfolios().catch((e) => alert(e.message)));
+$('showArchived').addEventListener('change', () => refreshPortfolios().catch((e) => alert(e.message)));
 $('savedPortfolios').addEventListener('click', async (event) => {
-  const button = event.target.closest('.play-portfolio');
+  const button = event.target.closest('button[data-id]');
   if (!button) return;
   const id = button.dataset.id;
-  const date = document.querySelector(`.play-date[data-id="${id}"]`)?.value;
-  const time = document.querySelector(`.play-time[data-id="${id}"]`)?.value;
   button.disabled = true;
   try {
-    const result = await api(`/api/portfolios/${id}/play`, { method: 'POST', body: JSON.stringify({ targetDrawDate: date, targetDrawTime: time }) });
-    button.textContent = `Salvate ${result.playsCreated} giocate`;
-    await Promise.all([refreshPlays(), refreshDashboard(), refreshPortfolios()]);
-  } catch (error) {
-    alert(error.message);
-  } finally { button.disabled = false; }
+    if (button.classList.contains('archive-portfolio')) {
+      if (!confirm('Eliminare il portfolio #' + id + ' dalla lista attiva? Le giocate e i premi restano intatti. Puoi ripristinarlo dagli archiviati.')) return;
+      await api(`/api/portfolios/${id}`, { method: 'DELETE' });
+    } else if (button.classList.contains('restore-portfolio')) {
+      await api(`/api/portfolios/${id}/restore`, { method: 'POST', body: '{}' });
+    } else if (button.classList.contains('analyze-portfolio')) {
+      button.textContent = 'Analisi in corso...';
+      const result = await api(`/api/portfolios/${id}/analyze`, { method: 'POST', body: JSON.stringify(labFormOptions()) });
+      renderLabAnalysis(result, 'savedPortfolioAnalysis');
+      $('savedPortfolioAnalysis').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    } else if (button.classList.contains('play-portfolio')) {
+      const date = document.querySelector(`.play-date[data-id="${id}"]`)?.value;
+      const time = document.querySelector(`.play-time[data-id="${id}"]`)?.value;
+      const result = await api(`/api/portfolios/${id}/play`, { method: 'POST', body: JSON.stringify({ targetDrawDate: date, targetDrawTime: time }) });
+      button.textContent = `Salvate ${result.playsCreated} giocate`;
+    }
+    await Promise.all([refreshPlays(), refreshDashboard(), refreshPortfolios(), refreshEvidence()]);
+  } catch (error) { alert(error.message); }
+  finally { button.disabled = false; }
 });
+
+function renderEvidence(data) {
+  const row = (name, x) => `<tr><td>${name}</td><td>${x.plays}</td><td>${x.winning} / ${x.settled} concluse</td><td>${euro(x.spentCents)}</td><td>${euro(x.confirmedPayoutCents)}</td><td>${euro(x.recordedNetCents)}</td><td>${x.provisional ? 'PROVVISORIO: ' + x.unresolvedPlays + ' da completare' : 'Completo'}</td></tr>`;
+  $('personalEvidence').innerHTML = `<div class="table-wrap"><table><thead><tr><th>Periodo</th><th>Schedine</th><th>Premiate</th><th>Speso</th><th>Premi confermati</th><th>Saldo registrato</th><th>Stato</th></tr></thead><tbody>${row('Ultime ' + data.recentLimit + ' schedine (o tutte se meno)', data.recent)}${row('Tutte le schedine', data.all)}</tbody></table></div><p class="small-msg">${esc(data.note)}</p>`;
+}
+async function refreshEvidence() {
+  renderEvidence(await api('/api/personal-evidence'));
+}
+$('refreshEvidence').addEventListener('click', () => refreshEvidence().catch((e) => alert(e.message)));
 
 $('manualPlayForm').addEventListener('submit', async (event) => {
   event.preventDefault();
@@ -313,7 +393,7 @@ $('manualPlayForm').addEventListener('submit', async (event) => {
   try {
     await api('/api/plays/manual', { method: 'POST', body: JSON.stringify({ targetDrawDate: $('manualPlayDate').value, targetDrawTime: $('manualPlayTime').value, mode: $('manualPlayMode').value, numbers, numerone: Number($('manualPlayNumerone').value) }) });
     $('manualPlayNumbers').value = '';
-    await Promise.all([refreshPlays(), refreshDashboard()]);
+    await Promise.all([refreshPlays(), refreshDashboard(), refreshEvidence()]);
   } catch (error) { alert(error.message); }
 });
 
@@ -334,7 +414,7 @@ $('settlePlays').addEventListener('click', async () => {
   try {
     const r = await api('/api/plays/settle', { method: 'POST', body: '{}' });
     $('settlePlays').textContent = `Abbinati ${r.settled}`;
-    await Promise.all([refreshPlays(), refreshDashboard()]);
+    await Promise.all([refreshPlays(), refreshDashboard(), refreshEvidence()]);
   } catch (error) { alert(error.message); }
 });
 $('playsBody').addEventListener('click', async (event) => {
@@ -346,9 +426,9 @@ $('playsBody').addEventListener('click', async (event) => {
   if (!Number.isFinite(amount) || amount < 0) return alert('Importo non valido');
   try {
     await api(`/api/plays/${button.dataset.id}/payout`, { method: 'PUT', body: JSON.stringify({ payoutCents: Math.round(amount * 100) }) });
-    await Promise.all([refreshPlays(), refreshDashboard()]);
+    await Promise.all([refreshPlays(), refreshDashboard(), refreshEvidence()]);
   } catch (error) { alert(error.message); }
 });
 
-await Promise.all([refreshHealth(), refreshProfile(), refreshDashboard(), refreshDraws(), refreshStats(), refreshScrapeStatus(), refreshPortfolios(), refreshPlays()]);
+await Promise.all([refreshHealth(), refreshProfile(), refreshDashboard(), refreshDraws(), refreshStats(), refreshScrapeStatus(), refreshPortfolios(), refreshPlays(), refreshEvidence()]);
 setInterval(refreshScrapeStatus, 2500);

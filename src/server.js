@@ -1,15 +1,57 @@
 import http from 'node:http';
+import { randomInt } from 'node:crypto';
+import { Worker } from 'node:worker_threads';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { database } from './database.js';
 import { scrapeRange } from './scraper.js';
 import { buildStats } from './stats.js';
-import { buildCoveragePlan, evaluatePortfolio, monthlyCoverageProjection, optimizePortfolio } from './combinatorics.js';
+import { buildCoveragePlan, evaluatePortfolio, monthlyCoverageProjection } from './combinatorics.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.resolve(__dirname, '../public');
 const port = Number(process.env.PORT || 8080);
+
+let labBusy = false;
+
+// Il calcolo CPU non blocca import, letture SQLite e interfaccia HTTP.
+async function runLab(task, input) {
+  if (labBusy) { const e = new Error('Un calcolo del laboratorio e gia in corso'); e.statusCode = 409; throw e; }
+  labBusy = true;
+  try {
+    return await new Promise((resolve, reject) => {
+      const worker = new Worker(new URL('./lab-worker.js', import.meta.url), { workerData: { task, input } });
+      let done = false;
+      const finish = (error, result) => {
+        if (done) return;
+        done = true; clearTimeout(timer); worker.terminate();
+        if (error) reject(error); else resolve(result);
+      };
+      const timer = setTimeout(() => finish(new Error('Tempo di calcolo superato. Usa qualita Veloce o meno combinazioni.')), 300000);
+      worker.on('message', (message) => {
+        if (message.ok) finish(null, message.result);
+        else { const e = new Error(message.error); e.statusCode = 400; finish(e); }
+      });
+      worker.on('error', (error) => finish(error));
+      worker.on('exit', (code) => { if (!done) finish(new Error(`Worker terminato senza risultato (${code})`)); });
+    });
+  } finally { labBusy = false; }
+}
+
+function labOptions(body) {
+  return {
+    mode: body.mode || '2e',
+    goal: body.goal || 'coverage',
+    strategy: body.strategy || 'coverage',
+    quality: body.quality || 'normal',
+    historyWindow: body.historyWindow === 'all' ? 'all' : Number(body.historyWindow ?? 5000),
+    historicalWeight: Number(body.historicalWeight ?? 0.25),
+    recentShare: Number(body.recentShare ?? 0.5),
+    scenario: body.scenario || {},
+    historyDraws: database.getAllDrawsAscending(),
+  };
+}
 
 let scrapeJob = {
   running: false,
@@ -53,7 +95,7 @@ function serveStatic(urlPath, res) {
   const fullPath = path.resolve(publicDir, relative);
   if (!fullPath.startsWith(publicDir) || !fs.existsSync(fullPath) || fs.statSync(fullPath).isDirectory()) return false;
   const body = fs.readFileSync(fullPath);
-  res.writeHead(200, { 'content-type': mime(fullPath), 'content-length': body.length });
+  res.writeHead(200, { 'content-type': mime(fullPath), 'content-length': body.length, 'cache-control': 'no-cache' });
   res.end(body);
   return true;
 }
@@ -170,14 +212,38 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && url.pathname === '/api/portfolio/optimize') {
       const body = await readJson(req);
-      const result = optimizePortfolio({
-        tickets: Number(body.tickets || 5),
-        mode: body.mode || '1e',
-        seed: Number(body.seed || 42),
-        iterations: Math.min(10000, Math.max(100, Number(body.iterations || 1200))),
-        sampleSize: Math.min(20000, Math.max(2000, Number(body.sampleSize || 12000))),
+      if (labBusy) return sendJson(res, 409, { error: 'Un calcolo del laboratorio e gia in corso' });
+      const result = await runLab('optimize', {
+        ...labOptions(body),
+        tickets: Number(body.tickets ?? 5),
+        baseSeed: Number.isInteger(body.baseSeed) ? body.baseSeed >>> 0 : randomInt(1, 0x7fffffff),
+        savedPortfolios: database.listPortfolios({ limit: -1 }),
       });
-      return sendJson(res, 200, result);
+      return sendJson(res, 200, { ...result, personalEvidence: database.getPlayEvidence() });
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/personal-evidence') {
+      return sendJson(res, 200, database.getPlayEvidence());
+    }
+
+    const analyzeMatch = url.pathname.match(/^\/api\/portfolios\/(\d+)\/analyze$/);
+    if (req.method === 'POST' && analyzeMatch) {
+      const p = database.getPortfolio(Number(analyzeMatch[1]));
+      if (!p) return sendJson(res, 404, { error: 'Portfolio non trovato' });
+      const body = await readJson(req);
+      const result = await runLab('analyze', { ...labOptions(body), mode: p.mode, portfolio: p.tickets });
+      return sendJson(res, 200, { ...result, name: p.name, portfolioId: p.id, personalEvidence: database.getPlayEvidence() });
+    }
+
+    const archiveMatch = url.pathname.match(/^\/api\/portfolios\/(\d+)$/);
+    if (req.method === 'DELETE' && archiveMatch) {
+      const result = database.archivePortfolio(Number(archiveMatch[1]));
+      return sendJson(res, result ? 200 : 404, result || { error: 'Portfolio non trovato' });
+    }
+    const restoreMatch = url.pathname.match(/^\/api\/portfolios\/(\d+)\/restore$/);
+    if (req.method === 'POST' && restoreMatch) {
+      const result = database.restorePortfolio(Number(restoreMatch[1]));
+      return sendJson(res, result ? 200 : 404, result || { error: 'Portfolio non trovato' });
     }
 
     if (req.method === 'POST' && url.pathname === '/api/coverage/plan') {
@@ -194,7 +260,7 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, result);
     }
 
-    if (req.method === 'GET' && url.pathname === '/api/portfolios') return sendJson(res, 200, { items: database.listPortfolios({ limit: 200 }) });
+    if (req.method === 'GET' && url.pathname === '/api/portfolios') return sendJson(res, 200, { items: database.listPortfolios({ limit: 200, includeArchived: url.searchParams.get('includeArchived') === '1' }) });
 
     if (req.method === 'POST' && url.pathname === '/api/portfolios') {
       const body = await readJson(req);
@@ -270,7 +336,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && serveStatic(url.pathname, res)) return;
     return sendJson(res, 404, { error: 'Not found' });
   } catch (error) {
-    return sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) });
+    return sendJson(res, error.statusCode || 500, { error: error instanceof Error ? error.message : String(error) });
   }
 });
 

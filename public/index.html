@@ -101,13 +101,40 @@
     <section id="optimizer" class="card">
       <div class="section-head"><div><h2>4. Portfolio optimizer</h2><p>Ottimizza la sovrapposizione e poi misura la coverage esattamente su tutti i 184.756 esiti.</p></div></div>
       <form id="optimizerForm" class="form-grid four">
-        <label>Numero combinazioni<input type="number" id="tickets" value="5" min="1" max="100" /></label>
-        <label>Modalità<select id="mode"><option value="1e">1 € — 7/8/9/10</option><option value="2e">2 € — anche 0/1/2/3</option></select></label>
-        <label>Iterazioni<input type="number" id="iterations" value="1200" min="100" max="10000" step="100" /></label>
-        <label>Seed<input type="number" id="seed" value="42" /></label>
-        <div class="actions"><button type="submit">Ottimizza</button></div>
+        <label>Combinazioni per UN concorso<input type="number" id="tickets" value="5" min="1" max="100" /></label>
+        <label>Costo di UNA combinazione<select id="mode"><option value="1e">1 euro</option><option value="2e" selected>2 euro</option></select></label>
+        <label>Obiettivo da ottimizzare<select id="optimizerGoal">
+          <option value="coverage">Almeno una categoria premiata</option>
+          <option value="recover">Recupero della spesa - scenario lordo</option>
+          <option value="profit">Superare la spesa - scenario lordo</option>
+        </select></label>
+        <label>Metodo<select id="optimizerStrategy">
+          <option value="coverage" selected>Solo matematica</option>
+          <option value="hybrid">Matematica + score storico (sperimentale)</option>
+          <option value="historical">Solo score storico (NON predittivo)</option>
+        </select></label>
+        <label>Qualita ricerca<select id="optimizerQuality"><option value="fast">Veloce</option><option value="normal" selected>Normale</option><option value="deep">Profonda</option></select></label>
+        <label>Periodo recente da confrontare col totale<select id="historyWindow"><option value="500">Ultime 500 estrazioni</option><option value="2000">Ultime 2.000</option><option value="5000" selected>Ultime 5.000</option><option value="10000">Ultime 10.000</option><option value="all">Tutto (nessuna distinzione recente)</option></select></label>
+        <label>Peso storico nell'obiettivo ibrido<select id="historicalWeight"><option value="0.10" selected>10% (sperimentale)</option><option value="0.25">25% (sperimentale)</option><option value="0.40">40% (sperimentale)</option></select></label>
+        <label>Composizione dello score storico<select id="recentShare"><option value="0.25">25% recente + 75% totale</option><option value="0.5" selected>50% recente + 50% totale</option><option value="0.75">75% recente + 25% totale</option></select></label>
+        <details class="span-3 manual-box">
+          <summary>Quote ipotetiche del modello economico (euro LORDI)</summary>
+          <p>Valori iniziali indicativi, NON quote ufficiali del prossimo concorso. Bonus Numerone aggiunti al premio base. Rendita, imposte e variazione delle quote esclusi. Il 7/3 non e sempre 2 euro in caso di montepremi insufficiente.</p>
+          <div class="form-grid four">
+            <label>Base 7 / 3<input id="quoteBase7" type="number" value="2" min="0" step="0.01" /></label>
+            <label>Base 8 / 2<input id="quoteBase8" type="number" value="10" min="0" step="0.01" /></label>
+            <label>Base 9 / 1<input id="quoteBase9" type="number" value="60" min="0" step="0.01" /></label>
+            <label>Base 10 / 0<input id="quoteBase10" type="number" value="10000" min="0" step="0.01" /></label>
+            <label>Bonus 7 / 3 + Numerone<input id="quoteBonus7" type="number" value="12" min="0" step="0.01" /></label>
+            <label>Bonus 8 / 2 + Numerone<input id="quoteBonus8" type="number" value="20" min="0" step="0.01" /></label>
+            <label>Bonus 9 / 1 + Numerone<input id="quoteBonus9" type="number" value="500" min="0" step="0.01" /></label>
+          </div>
+        </details>
+        <div class="actions"><button type="submit">Cerca e confronta con i salvati</button></div>
       </form>
+      <p class="small-msg"><strong>Nessuna vincita garantita.</strong> Il calcolo vale per tutte le combinazioni nello stesso concorso. Lo storico non rende un numero piu probabile in un'estrazione indipendente. Le giocate personali servono alla contabilita, NON a suggerire aumenti di puntata per recuperare perdite.</p>
       <div id="optimizerMeta" class="optimizer-meta">Nessun portfolio generato.</div>
+      <div id="labAnalysis" class="optimizer-meta"></div>
       <div id="portfolio" class="portfolio"></div>
 
       <div class="save-box">
@@ -126,8 +153,8 @@
     <section id="budget" class="card">
       <div class="section-head"><div><h2>5. Range di spesa e coverage</h2><p>Il planner genera portfolio progressivi e calcola la coverage <strong>esatta</strong> per ogni riga. Se compare 100%, quel portfolio copre ogni esito principale; non garantisce utile economico.</p></div></div>
       <form id="coverageForm" class="form-grid five-cols">
-        <label>Budget minimo (€)<input id="minBudget" type="number" value="2" min="1" step="1" /></label>
-        <label>Budget massimo (€)<input id="maxBudget" type="number" value="20" min="1" max="200" step="1" /></label>
+        <label>Spesa minima per concorso (€)<input id="minBudget" type="number" value="2" min="1" step="1" /></label>
+        <label>Spesa massima per concorso (€)<input id="maxBudget" type="number" value="20" min="1" max="200" step="1" /></label>
         <label>Modalità<select id="coverageMode"><option value="1e">1 €</option><option value="2e" selected>2 €</option></select></label>
         <label>Punti da analizzare<input id="maxPoints" type="number" value="10" min="2" max="20" /></label>
         <label>Seed<input id="coverageSeed" type="number" value="42" /></label>
@@ -139,7 +166,10 @@
 
     <section id="portafogli" class="card">
       <div class="section-head"><div><h2>6. Portafogli salvati</h2><p>Da qui puoi registrare il portfolio come realmente giocato su una specifica estrazione.</p></div><button id="refreshPortfolios" type="button" class="secondary">Aggiorna</button></div>
+      <label class="small-msg"><input type="checkbox" id="showArchived" /> Mostra anche i portafogli eliminati dalla lista (archiviati)</label>
+      <p class="small-msg">Elimina rimuove il portafoglio dalla lista attiva, ma conserva numeri, giocate, premi e collegamenti contabili. Puoi ripristinarlo.</p>
       <div id="savedPortfolios" class="saved-portfolios"></div>
+      <div id="savedPortfolioAnalysis" class="optimizer-meta"></div>
 
       <details class="manual-box">
         <summary>Inserisci un portfolio manuale</summary>
@@ -181,10 +211,15 @@
     </section>
 
     <section class="card">
+      <div class="section-head"><div><h2>Ultime giocate personali e totale</h2><p>Soldi registrati realmente. Le singole schedine dello stesso concorso non sono osservazioni indipendenti. Nessun premio ipotetico entra nel saldo.</p></div><button type="button" id="refreshEvidence" class="secondary">Aggiorna</button></div>
+      <div id="personalEvidence"></div>
+    </section>
+
+    <section class="card">
       <div class="section-head"><div><h2>Ultime estrazioni salvate</h2><p>Serve anche per controllare visivamente che il database sia aggiornato.</p></div></div>
       <div class="table-wrap"><table><thead><tr><th>Concorso</th><th>Data</th><th>Ora</th><th>Combinazione</th><th>Numerone</th></tr></thead><tbody id="drawsBody"></tbody></table></div>
     </section>
   </main>
-  <script type="module" src="/app.js"></script>
+  <script type="module" src="/app.js?v=lab4"></script>
 </body>
 </html>

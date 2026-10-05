@@ -355,15 +355,59 @@ export function createDatabase(dbPath, { migrateLegacy = false } = {}) {
     };
   }
 
-  function listPortfolios({ limit = 100 } = {}) {
-    const rows = sql.prepare('SELECT * FROM portfolios ORDER BY created_at DESC LIMIT ?').all(Number(limit));
+  function listPortfolios({ limit = 100, includeArchived = false } = {}) {
+    const where = includeArchived ? '' : "WHERE status <> 'ARCHIVED'";
+    const rows = sql.prepare(`SELECT * FROM portfolios ${where} ORDER BY created_at DESC LIMIT ?`).all(Number(limit));
     const ticketStmt = sql.prepare('SELECT * FROM portfolio_tickets WHERE portfolio_id = ? ORDER BY position');
     return rows.map((row) => portfolioRow(row, ticketStmt.all(row.id)));
+  }
+
+  // Eliminazione logica: le giocate contengono costi e premi che NON vanno rimossi.
+  function archivePortfolio(id) {
+    const p = getPortfolio(id);
+    if (!p) return null;
+    sql.prepare("UPDATE portfolios SET status='ARCHIVED',updated_at=? WHERE id=?").run(nowIso(), p.id);
+    const linked = sql.prepare('SELECT COUNT(*) AS n FROM plays WHERE portfolio_id=?').get(p.id);
+    return { portfolioId: p.id, archived: true, playsPreserved: Number(linked.n) };
+  }
+
+  function restorePortfolio(id) {
+    const p = getPortfolio(id);
+    if (!p) return null;
+    if (p.status === 'ARCHIVED') {
+      const linked = sql.prepare('SELECT COUNT(*) AS n FROM plays WHERE portfolio_id=?').get(p.id);
+      sql.prepare('UPDATE portfolios SET status=?,updated_at=? WHERE id=?')
+        .run(linked.n > 0 ? 'PLAYED' : 'DRAFT', nowIso(), p.id);
+    }
+    return getPortfolio(p.id);
+  }
+
+  function getPlayEvidence(recentLimit = 100) {
+    const all = listPlays({ limit: -1 });
+    const aggregate = (rows) => {
+      let spent = 0, paid = 0, pending = 0, settled = 0, winning = 0;
+      for (const p of rows) {
+        spent += p.costCents;
+        if (p.payoutConfirmed) paid += p.payoutCents;
+        if (p.status === 'SETTLED') {
+          settled++;
+          if (p.category !== 'NO_PRIZE') winning++;
+        }
+        if (p.status !== 'SETTLED' || (p.category !== 'NO_PRIZE' && !p.payoutConfirmed)) pending++;
+      }
+      return { plays: rows.length, settled, winning, spentCents: spent,
+        confirmedPayoutCents: paid, recordedNetCents: paid - spent,
+        recordedRoiPct: spent ? (paid - spent) / spent * 100 : null,
+        unresolvedPlays: pending, provisional: pending > 0 };
+    };
+    return { all: aggregate(all), recent: aggregate(all.slice(0, recentLimit)), recentLimit,
+      note: 'Giocate personali, non estrazioni ufficiali. Saldo provvisorio se mancano risultati o premi. Nessun uso per recuperare perdite aumentando le puntate.' };
   }
 
   function registerPortfolioPlay(portfolioId, { targetDrawDate, targetDrawTime }) {
     const portfolio = getPortfolio(portfolioId);
     if (!portfolio) throw new Error('Portfolio non trovato');
+    if (portfolio.status === 'ARCHIVED') throw new Error('Ripristina il portfolio prima di registrare altre giocate');
     if (!/^\d{4}-\d{2}-\d{2}$/.test(targetDrawDate || '')) throw new Error('Data estrazione non valida');
     if (!/^\d{2}:\d{2}$/.test(targetDrawTime || '')) throw new Error('Ora estrazione non valida');
     const batch = randomUUID();
@@ -576,6 +620,9 @@ export function createDatabase(dbPath, { migrateLegacy = false } = {}) {
     savePortfolio,
     getPortfolio,
     listPortfolios,
+    archivePortfolio,
+    restorePortfolio,
+    getPlayEvidence,
     registerPortfolioPlay,
     registerManualPlay,
     listPlays,

@@ -312,3 +312,192 @@ export function monthlyCoverageProjection(probabilityPerDraw, draws) {
     probabilityAtLeastOne: n ? 1 - ((1 - p) ** n) : 0,
   };
 }
+
+function clamp01(value) {
+  return Math.max(0, Math.min(1, Number(value) || 0));
+}
+
+function normalizeSeries(values) {
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  if (!Number.isFinite(min) || !Number.isFinite(max) || max - min < 1e-12) return values.map(() => 0.5);
+  return values.map((value) => (value - min) / (max - min));
+}
+
+export function buildHistoricalModel(draws = [], { window = 5000 } = {}) {
+  const source = Array.isArray(draws) ? draws : [];
+  const requestedWindow = window === 'all' ? source.length : Math.max(1, Number(window) || 5000);
+  const selected = source.slice(Math.max(0, source.length - requestedWindow));
+  const numberWeighted = Array(21).fill(0);
+  const numeroneWeighted = Array(21).fill(0);
+  const pairWeighted = Array.from({ length: 21 }, () => Array(21).fill(0));
+  let totalWeight = 0;
+
+  selected.forEach((draw, index) => {
+    const recency = selected.length <= 1 ? 1 : index / (selected.length - 1);
+    const weightValue = 0.35 + (0.65 * recency);
+    totalWeight += weightValue;
+    const nums = Array.isArray(draw.numbers) ? draw.numbers : [];
+    for (const n of nums) if (Number.isInteger(n) && n >= 1 && n <= 20) numberWeighted[n] += weightValue;
+    for (let i = 0; i < nums.length; i += 1) {
+      for (let j = i + 1; j < nums.length; j += 1) {
+        const a = Math.min(nums[i], nums[j]);
+        const b = Math.max(nums[i], nums[j]);
+        if (a >= 1 && b <= 20) pairWeighted[a][b] += weightValue;
+      }
+    }
+    if (Number.isInteger(draw.numerone) && draw.numerone >= 1 && draw.numerone <= 20) numeroneWeighted[draw.numerone] += weightValue;
+  });
+
+  const numberScores = Array(21).fill(0.5);
+  normalizeSeries(Array.from({ length: 20 }, (_, i) => numberWeighted[i + 1])).forEach((value, index) => {
+    numberScores[index + 1] = value;
+  });
+
+  const pairEntries = [];
+  for (let a = 1; a <= 20; a += 1) {
+    for (let b = a + 1; b <= 20; b += 1) pairEntries.push({ a, b, value: pairWeighted[a][b] });
+  }
+  const pairScores = Array.from({ length: 21 }, () => Array(21).fill(0.5));
+  normalizeSeries(pairEntries.map((item) => item.value)).forEach((value, index) => {
+    const { a, b } = pairEntries[index];
+    pairScores[a][b] = value;
+    pairScores[b][a] = value;
+  });
+
+  const numeroneScores = Array(21).fill(0.5);
+  normalizeSeries(Array.from({ length: 20 }, (_, i) => numeroneWeighted[i + 1])).forEach((value, index) => {
+    numeroneScores[index + 1] = value;
+  });
+
+  return { analyzedDraws: selected.length, firstDraw: selected[0] || null, lastDraw: selected.at(-1) || null, totalWeight, numberScores, pairScores, numeroneScores };
+}
+
+export function historicalTicketScore(numbers, model) {
+  if (!model || !Array.isArray(numbers) || numbers.length !== 10) return 0.5;
+  const numberScore = numbers.reduce((sum, n) => sum + (model.numberScores?.[n] ?? 0.5), 0) / numbers.length;
+  let pairTotal = 0;
+  let pairCount = 0;
+  for (let i = 0; i < numbers.length; i += 1) {
+    for (let j = i + 1; j < numbers.length; j += 1) {
+      pairTotal += model.pairScores?.[numbers[i]]?.[numbers[j]] ?? 0.5;
+      pairCount += 1;
+    }
+  }
+  const pairScore = pairCount ? pairTotal / pairCount : 0.5;
+  return clamp01((numberScore * 0.70) + (pairScore * 0.30));
+}
+
+export function historicalPortfolioScore(ticketNumbers, model) {
+  if (!Array.isArray(ticketNumbers) || !ticketNumbers.length) return 0.5;
+  return clamp01(ticketNumbers.reduce((sum, numbers) => sum + historicalTicketScore(numbers, model), 0) / ticketNumbers.length);
+}
+
+function historicalPortfolioScoreMasks(masks, model) {
+  return historicalPortfolioScore(masks.map(maskToNumbers), model);
+}
+
+function numeroniFromHistoricalModel(count, model) {
+  if (!model || !model.analyzedDraws) return numeroniFor(count);
+  const ranking = Array.from({ length: 20 }, (_, i) => i + 1).sort((a, b) => (model.numeroneScores[b] - model.numeroneScores[a]) || (a - b));
+  return Array.from({ length: count }, (_, i) => ranking[i % ranking.length]);
+}
+
+function strategyObjective({ coverageFraction, historicalFraction, strategy, historicalWeight }) {
+  if (strategy === 'historical') return historicalFraction;
+  if (strategy === 'hybrid') {
+    const w = clamp01(historicalWeight);
+    return ((1 - w) * coverageFraction) + (w * historicalFraction);
+  }
+  return coverageFraction;
+}
+
+function optimizePortfolioSingleStart({ tickets, mode, seed, iterations, sample, strategy, historicalWeight, historicalModel }) {
+  const rand = xorshift32(seed);
+  let portfolio = [];
+  const seen = new Set();
+  while (portfolio.length < tickets) {
+    const mask = randomTicketMask(rand);
+    if (!seen.has(mask)) { seen.add(mask); portfolio.push(mask); }
+  }
+  const baselinePortfolio = portfolio.slice();
+  const scorePortfolio = (masks) => {
+    const coverageFraction = sampleCoverage(masks, mode, sample) / sample.length;
+    const historicalFraction = historicalPortfolioScoreMasks(masks, historicalModel);
+    return { coverageFraction, historicalFraction, objective: strategyObjective({ coverageFraction, historicalFraction, strategy, historicalWeight }) };
+  };
+  let score = scorePortfolio(portfolio);
+  let accepted = 0;
+  for (let i = 0; i < iterations; i += 1) {
+    const idx = Math.floor(rand() * portfolio.length);
+    const candidateMask = mutateTicket(portfolio[idx], rand);
+    if (portfolio.includes(candidateMask)) continue;
+    const candidate = portfolio.slice();
+    candidate[idx] = candidateMask;
+    const candidateScore = scorePortfolio(candidate);
+    const isBetter = candidateScore.objective > score.objective + 1e-12
+      || (Math.abs(candidateScore.objective - score.objective) <= 1e-12 && candidateScore.coverageFraction >= score.coverageFraction);
+    if (isBetter) { portfolio = candidate; score = candidateScore; accepted += 1; }
+  }
+  return { seed, portfolio, baselinePortfolio, accepted, sampleScore: score };
+}
+
+const QUALITY_PROFILES = {
+  fast: { starts: 3, iterationsPerStart: 250, sampleSize: 4000 },
+  normal: { starts: 5, iterationsPerStart: 500, sampleSize: 5000 },
+  deep: { starts: 10, iterationsPerStart: 900, sampleSize: 8000 },
+};
+
+function seedForRun(baseSeed, index) {
+  return (((Number(baseSeed) >>> 0) + Math.imul(index + 1, 0x9e3779b1)) >>> 0) || (index + 1);
+}
+
+export function optimizePortfolioAdvanced({ tickets = 5, mode = '2e', strategy = 'hybrid', quality = 'normal', historyDraws = [], historyWindow = 5000, historicalWeight = 0.25, baseSeed = 42 } = {}) {
+  if (!Number.isInteger(tickets) || tickets < 1 || tickets > 100) throw new Error('tickets deve essere tra 1 e 100');
+  if (!['1e', '2e'].includes(mode)) throw new Error('mode deve essere 1e o 2e');
+  if (!['coverage', 'hybrid', 'historical'].includes(strategy)) throw new Error('Strategia non valida');
+  if (!Object.hasOwn(QUALITY_PROFILES, quality)) throw new Error('Qualità ricerca non valida');
+
+  const profile = QUALITY_PROFILES[quality];
+  const model = buildHistoricalModel(historyDraws, { window: historyWindow });
+  const weight = strategy === 'hybrid' ? Math.max(0.05, Math.min(0.75, Number(historicalWeight) || 0.25)) : 0;
+  const sample = sampleUniverse(profile.sampleSize);
+  let best = null;
+  const runSummaries = [];
+
+  for (let run = 0; run < profile.starts; run += 1) {
+    const seed = seedForRun(baseSeed, run);
+    const candidate = optimizePortfolioSingleStart({ tickets, mode, seed, iterations: profile.iterationsPerStart, sample, strategy, historicalWeight: weight, historicalModel: model });
+    const ticketNumbers = candidate.portfolio.map(maskToNumbers);
+    const exact = evaluatePortfolio(ticketNumbers, mode);
+    const historicalScore = historicalPortfolioScore(ticketNumbers, model);
+    const finalObjective = strategyObjective({ coverageFraction: exact.probability, historicalFraction: historicalScore, strategy, historicalWeight: weight });
+    runSummaries.push({ seed, coveragePct: exact.percentage, historicalScorePct: historicalScore * 100, objectiveScorePct: finalObjective * 100, acceptedMutations: candidate.accepted });
+    if (!best || finalObjective > best.finalObjective + 1e-12 || (Math.abs(finalObjective - best.finalObjective) <= 1e-12 && exact.percentage > best.exact.percentage)) {
+      best = { ...candidate, ticketNumbers, exact, historicalScore, finalObjective };
+    }
+  }
+
+  if (!best) throw new Error('Optimizer non ha prodotto alcun risultato');
+  const baselineNumbers = best.baselinePortfolio.map(maskToNumbers);
+  const baselineExact = evaluatePortfolio(baselineNumbers, mode);
+  const baselineHistoricalScore = historicalPortfolioScore(baselineNumbers, model);
+  const useHistoricalNumeroni = strategy !== 'coverage' && model.analyzedDraws > 0;
+  const numeroni = useHistoricalNumeroni ? numeroniFromHistoricalModel(tickets, model) : numeroniFor(tickets);
+
+  return {
+    algorithm: 'multi-start-hill-climb-v3', globallyOptimalGuaranteed: false,
+    strategy, quality, seed: best.seed, selectedSeed: best.seed, baseSeed: Number(baseSeed) >>> 0,
+    starts: profile.starts, iterations: profile.starts * profile.iterationsPerStart, iterationsPerStart: profile.iterationsPerStart,
+    acceptedMutations: best.accepted, sampleSize: sample.length, historicalWeight: weight,
+    historicalScore: best.historicalScore, historicalScorePct: best.historicalScore * 100,
+    baselineHistoricalScore, baselineHistoricalScorePct: baselineHistoricalScore * 100,
+    objectiveScore: best.finalObjective, objectiveScorePct: best.finalObjective * 100,
+    history: { requestedWindow: historyWindow, analyzedDraws: model.analyzedDraws, firstDraw: model.firstDraw, lastDraw: model.lastDraw, note: 'Lo score storico descrive frequenze e coppie passate con peso di recenza; non è una probabilità futura garantita.' },
+    numeroniStrategy: useHistoricalNumeroni ? 'historical-score-diversified' : 'diversified',
+    portfolio: best.ticketNumbers.map((numbers, index) => ({ numbers, numerone: numeroni[index] })),
+    exact: best.exact, baselineExact,
+    runs: runSummaries.sort((a, b) => b.objectiveScorePct - a.objectiveScorePct),
+  };
+}
+
