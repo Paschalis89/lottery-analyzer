@@ -1,0 +1,27 @@
+services:
+  lottery-analyzer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: lottery-analyzer
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 8080
+      SCRAPE_DELAY_MS: ${SCRAPE_DELAY_MS:-1000}
+    ports:
+      - "${LOTTERY_BIND_IP:-0.0.0.0}:${LOTTERY_HOST_PORT:-8092}:8080"
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8080/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
